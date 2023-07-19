@@ -42,14 +42,15 @@ parser.add_argument('--image_dir', default='/red/ruogu.fang/UKB/data/Eye/21015_f
 parser.add_argument('--csv_dir', default='/red/ruogu.fang/leem.s/NSF-SCH/data/age.csv', type=str, help='random seed')
 
 parser.add_argument('--eye_code', default='_21015_0_0.png', type=str, help='random seed')
-parser.add_argument('--label_code', default='21003-0.0', type=str, help='random seed')
+parser.add_argument('--label_code', default='31-0.0', type=str, help='random seed')
+parser.add_argument('--exclude', type=list, action='store')
 
-parser.add_argument('--working_dir', default='ViT_age', type=str, help='random seed')
-parser.add_argument('--model_name', default='ViT_age', type=str, help='random seed')
+parser.add_argument('--working_dir', default='ViT_sex', type=str, help='random seed')
+parser.add_argument('--model_name', default='ViT_sex', type=str, help='random seed')
 parser.add_argument('--base_model', default='google/vit-base-patch16-224-in21k', type=str,
                     help='the string of model from hugging-face library')
 
-parser.add_argument('--lr', default=1e-4, type=float, help='learning rate of the training')
+parser.add_argument('--lr', default=2e-4, type=float, help='learning rate of the training')
 parser.add_argument('--epoch', default=100, type=int, help='maximum number of epoch')
 
 # set argument as input variables
@@ -71,6 +72,7 @@ image_dir = args.image_dir
 csv_dir = args.csv_dir
 eye_code = args.eye_code
 label_code = args.label_code
+ex = args.exclude
 
 # extract the patient eid with both images and label csv files
 file_list = os.listdir(image_dir)
@@ -84,6 +86,10 @@ csv_df = csv_df.astype(convert_dict)
 label_df = csv_df[csv_df['eid'].isin(eid_list)]
 label_df = label_df.dropna(subset=[label_code])
 
+if ex:
+    for i in ex:
+        label_df = label_df[label_df[label_code] != i]
+
 label_df['image'] = label_df['eid'] + eye_code
 label_df['path'] = image_dir + label_df['image']
 
@@ -92,9 +98,12 @@ X = label_df['path'].values.tolist()
 y = label_df[label_code].values.tolist()
 
 # Defining the train, val, test split
-X_train, X_remain, y_train, y_remain = train_test_split(X, y, train_size=0.8, random_state=random_state)
-X_val, X_test, y_val, y_test = train_test_split(X_remain, y_remain, train_size=0.5, random_state=random_state)
+X_train, X_remain, y_train, y_remain = train_test_split(X, y, train_size=0.8, random_state=random_state, stratify=y)
+X_val, X_test, y_val, y_test = train_test_split(X_remain, y_remain, train_size=0.5, random_state=random_state, stratify=y)
 
+print('The size of training samples {}'.format(len(y_train)) )
+print('The size of validation samples {}'.format(len(y_val)))
+print('The size of test samples {}'.format(len(y_test)))
 
 # Classification dataset definition
 class ClassificationDataset(torch.utils.data.Dataset):
@@ -192,8 +201,8 @@ def train_model(model=model,
                 working_dir='./red/ruogu.fang/leem.s/NSF-SCH/code/savedmodel'):
 
     # defining the path for saving the model.
-    if not os.path.exists(working_dir):
-        os.makedirs(working_dir)
+    if not os.path.exists(os.path.join('./savedmodel', working_dir):
+        os.makedirs(os.path.join('./savedmodel', working_dir)
 
     # initialization of the variable for analysis
     best_loss = 0
@@ -266,11 +275,8 @@ def train_model(model=model,
                         best_model = model
                         best_metric = result
                         best_metric_epoch = epoch
-                        best_model_wts = copy.deepcopy(best_model.state_dict())
                         if dist.get_rank() == 0:
                             print("the best model has been updated")
-                        # torch.save(best_model.state_dict(), os.path.join(working_dir, model_name+str(best_metric_epoch+1)+'.pth'))
-                        # print("saved new best metric model")
 
                 if dist.get_rank() == 0:
                     print(
@@ -282,7 +288,8 @@ def train_model(model=model,
         metric.reset()
 
     print(f"[{dist.get_rank()}] " + f"train completed, epoch losses: {epoch_loss_values}")
-    torch.save(best_model.state_dict(), os.path.join(working_dir, model_name + str(best_metric_epoch + 1) + '.pth'))
+    torch.save(best_model.module.state_dict(), os.path.join('./savedmodel', working_dir, model_name + str(best_metric_epoch + 1) + '.pth'))
+    best_model_wts = copy.deepcopy(best_model.module.state_dict())
     best_model.load_state_dict(best_model_wts)
     return best_model
 
