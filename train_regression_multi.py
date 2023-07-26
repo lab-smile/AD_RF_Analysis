@@ -42,7 +42,7 @@ parser.add_argument('--csv_dir', default='/red/ruogu.fang/leem.s/NSF-SCH/data/ag
 
 parser.add_argument('--eye_code', default='_21015_0_0.png', type=str, help='random seed')
 parser.add_argument('--label_code', default='21003-0.0', type=str, help='random seed')
-parser.add_argument('--exclude', type=list, action='store')
+parser.add_argument('--exclude', type=float, nargs='+')
 
 parser.add_argument('--working_dir', default='ViT_age', type=str, help='random seed')
 parser.add_argument('--model_name', default='ViT_age', type=str, help='random seed')
@@ -162,12 +162,9 @@ val_loader = DataLoader(val_ds, batch_size=32, shuffle=False, pin_memory=True,sa
 test_ds = RegressionDataset(X_test, y_test, val_transforms)
 test_loader = DataLoader(test_ds, batch_size=32, shuffle=False)
 
-from transformers import ViTFeatureExtractor, ViTForImageClassification
-
 # Defining the model
+from transformers import ViTFeatureExtractor, ViTForImageClassification
 model_name_or_path = args.base_model
-feature_extractor = ViTFeatureExtractor.from_pretrained(model_name_or_path)
-metric = torchmetrics.MeanAbsoluteError().to(device)
 
 device = torch.device(f"cuda:{args.local_rank}")
 torch.cuda.set_device(device)
@@ -176,6 +173,7 @@ model = ViTForImageClassification.from_pretrained(
     model_name_or_path,
     num_labels=1)
 
+metric = torchmetrics.MeanAbsoluteError().to(device)
 model.metric = metric
 model.to(device)
 
@@ -198,6 +196,8 @@ def train_model(model=model,
 
     if not os.path.exists(os.path.join('./savedmodel', working_dir)):
         os.makedirs(os.path.join('./savedmodel', working_dir))
+    else:
+        pass
 
     best_loss = 0
     best_metric = -1
@@ -287,10 +287,9 @@ def train_model(model=model,
     print(f"[{dist.get_rank()}] " + f"train completed, epoch losses: {epoch_loss_values}")
     torch.save(best_model.module.state_dict(), os.path.join('./savedmodel', working_dir, model_name+str(best_metric_epoch+1)+'.pth'))
     best_model_wts = copy.deepcopy(best_model.module.state_dict())
-    best_model.load_state_dict(best_model_wts)
-    return best_model
+    return best_model_wts
 
-best_model = train_model(model=model, train_loader=train_loader, val_loader=val_loader, max_epochs=max_epochs, optimizer=optimizer,
+best_model_wts = train_model(model=model, train_loader=train_loader, val_loader=val_loader, max_epochs=max_epochs, optimizer=optimizer,
             loss_function=loss_function, model_name=args.model_name, working_dir=args.working_dir)
 
 dist.destroy_process_group()

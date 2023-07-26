@@ -43,7 +43,7 @@ parser.add_argument('--csv_dir', default='/red/ruogu.fang/leem.s/NSF-SCH/data/ag
 
 parser.add_argument('--eye_code', default='_21015_0_0.png', type=str, help='random seed')
 parser.add_argument('--label_code', default='31-0.0', type=str, help='random seed')
-parser.add_argument('--exclude', type=list, action='store')
+parser.add_argument('--exclude', type=float, nargs='+')
 
 parser.add_argument('--working_dir', default='ViT_sex', type=str, help='random seed')
 parser.add_argument('--model_name', default='ViT_sex', type=str, help='random seed')
@@ -99,7 +99,7 @@ y = label_df[label_code].values.tolist()
 
 # Defining the train, val, test split
 X_train, X_remain, y_train, y_remain = train_test_split(X, y, train_size=0.8, random_state=random_state, stratify=y)
-X_val, X_test, y_val, y_test = train_test_split(X_remain, y_remain, train_size=0.5, random_state=random_state, stratify=y)
+X_val, X_test, y_val, y_test = train_test_split(X_remain, y_remain, train_size=0.5, random_state=random_state, stratify=y_remain)
 
 print('The size of training samples {}'.format(len(y_train)) )
 print('The size of validation samples {}'.format(len(y_val)))
@@ -170,7 +170,6 @@ test_loader = DataLoader(test_ds, batch_size=32, shuffle=False)
 # Defining the model
 from transformers import ViTFeatureExtractor, ViTForImageClassification
 model_name_or_path = args.base_model
-feature_extractor = ViTFeatureExtractor.from_pretrained(model_name_or_path)
 
 device = torch.device(f"cuda:{args.local_rank}")
 torch.cuda.set_device(device)
@@ -201,8 +200,10 @@ def train_model(model=model,
                 working_dir='./red/ruogu.fang/leem.s/NSF-SCH/code/savedmodel'):
 
     # defining the path for saving the model.
-    if not os.path.exists(os.path.join('./savedmodel', working_dir):
-        os.makedirs(os.path.join('./savedmodel', working_dir)
+    if not os.path.exists(os.path.join('./savedmodel', working_dir)):
+        os.makedirs(os.path.join('./savedmodel', working_dir))
+    else:
+        pass
 
     # initialization of the variable for analysis
     best_loss = 0
@@ -290,12 +291,10 @@ def train_model(model=model,
     print(f"[{dist.get_rank()}] " + f"train completed, epoch losses: {epoch_loss_values}")
     torch.save(best_model.module.state_dict(), os.path.join('./savedmodel', working_dir, model_name + str(best_metric_epoch + 1) + '.pth'))
     best_model_wts = copy.deepcopy(best_model.module.state_dict())
-    best_model.load_state_dict(best_model_wts)
-    return best_model
+    return best_model_wts
 
 
-best_model = train_model(model=model, train_loader=train_loader, val_loader=val_loader, max_epochs=max_epochs,
-                         optimizer=optimizer,
-                         loss_function=loss_function, model_name=args.model_name, working_dir=args.working_dir)
-
+best_model_wts = train_model(model=model, train_loader=train_loader, val_loader=val_loader, max_epochs=max_epochs,
+                         optimizer=optimizer,loss_function=loss_function, model_name=args.model_name, working_dir=args.working_dir)
+      
 dist.destroy_process_group()
