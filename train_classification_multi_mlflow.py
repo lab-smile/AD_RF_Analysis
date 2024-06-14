@@ -1,23 +1,30 @@
+"""
+This script was primarily written by Seowung Leem, and revised by Yunchao Yang.
+The multi-mlflow version of the code is developed for multi-gpu application for the HiperGator Development Environment.
+Therefore, it might not work on some on different PC.
+
+For any questions, please email Seowung Leem.
+
+institute: leem.s@ufl.edu
+personal: dlatjdnd@gmail.com
+"""
+
+
 # Basic library
 import os
 import random
 import copy
 import numpy as np
 import pandas as pd
-import tqdm
 import argparse
 from datetime import timedelta
 
 # Pytorch Related Library
 import torch
-from torchvision import transforms
 from torch.optim import lr_scheduler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 import torchmetrics
-
-# Scikit-Learn Library
-from sklearn.model_selection import train_test_split
 
 # Monai Library
 from monai.data import DataLoader, DistributedSampler
@@ -32,39 +39,45 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from time import time
 
-#from ray import tune
-#from ray.tune.suggest.optuna import OptunaSearch
 
 # defining the input arguments for the script.
 parser = argparse.ArgumentParser(description='Parameters ')
-parser.add_argument('--random_state', default=0, type=int, help='random seed')
-parser.add_argument('--local-rank', type=int)
-parser.add_argument('--left_image_dir', default='/red/ruogu.fang/UKB/data/Eye/21015_fundus_left_1/', type=str,
-                    help='There are 2 image directories. You need to put left fundus image dir here.')
-parser.add_argument('--right_image_dir', default='/red/ruogu.fang/UKB/data/Eye/21016_fundus_right_1_horizontal/',
+parser.add_argument('--random_state', default=0, type=int, help='random seed for reproducibility')
+parser.add_argument('--local-rank', type=int, help='multigpu param')
+parser.add_argument('--left_image_dir', default='/red/ruogu.fang/share/UKB/data/Eye/21015_fundus_left_1_good/',
                     type=str,
-                    help='There are 2 image directories. You need to put right fundus image dir here. Keep in mind either left or right fundus images should be flipped horizontally.')
+                    help='There are 2 image directories. You need to put left fundus image dir here.')
 
-parser.add_argument('--csv_dir', default='/red/ruogu.fang/leem.s/NSF-SCH/data/classification_data.csv', type=str,
+parser.add_argument('--right_image_dir',
+                    default='/red/ruogu.fang/share/UKB/data/Eye/21016_fundus_right_1_horizontal_good/',
+                    type=str,
+                    help='There are 2 image directories. You need to put right fundus image dir here. '
+                         'Keep in mind either left or right fundus images should be flipped horizontally.')
+
+parser.add_argument('--csv_dir', default='/red/ruogu.fang/leem.s/NSF-SCH/data/classification_data2.csv', type=str,
                     help='Where the csv file for the dataset is stored.')
 
-parser.add_argument('--left_eye_code', default='_21015_0_0.png', type=str, help='The code added to eid of the UKB subjects')
-parser.add_argument('--right_eye_code', default='_21016_0_0.png', type=str, help='The code added to eid of the UKB subjects')
+parser.add_argument('--left_eye_code', default='_21015_0_0.png', type=str,
+                    help='The code added to eid of the UKB subjects')
+
+parser.add_argument('--right_eye_code', default='_21016_0_0.png', type=str,
+                    help='The code added to eid of the UKB subjects')
 
 parser.add_argument('--label', type=str, nargs='+', help='Column names of the csv file. It should be the label.')
-parser.add_argument('--exclude', type=float, nargs='+', help='The exclude code. example, -1, -2, -3 negative integers are not labels, but exclusion code for reason')
+parser.add_argument('--exclude', type=float, nargs='+',
+                    help='The exclude code. example, -1, -2, -3 negative integers are not labels, but exclusion code for reason')
 
 parser.add_argument('--working_dir', default='Swin_classification', type=str, help='where you would save the result')
 parser.add_argument('--model_name', default='Swin_classification', type=str, help='name of saved model.')
 parser.add_argument('--base_model', default='microsoft/swin-large-patch4-window12-384-in22k', type=str,
                     help='the string of model from hugging-face library')
 
-parser.add_argument('--input_size', default=224, type=int, help='input size for the model')
-parser.add_argument('--lr', default=2e-4, type=float, help='learning rate of the training')
+parser.add_argument('--input_size', default=576, type=int, help='input size for the model')
+parser.add_argument('--lr', default=1e-4, type=float, help='learning rate of the training')
 parser.add_argument('--epoch', default=100, type=int, help='maximum number of epoch')
 parser.add_argument('--batch_size', default=32, type=int, help='batch size of the training')
 
-parser.add_argument('--logdir', default="./log", type=str, help='log')
+parser.add_argument('--logdir', default="./log", type=str, help='directory where you save the log files.')
 
 # set argument as input variables
 args = parser.parse_args()
@@ -115,7 +128,7 @@ right_label_df['path'] = right_image_dir + right_label_df['image']
 # concatenate the left & right dataframe.
 label_df = pd.concat([right_label_df, left_label_df], ignore_index=True, axis=0)
 
-# excluding the exclude labels in each column
+# excluding the labels of excluding criteria in each column
 if ex:
     for lbl in label:
         for i in ex:
@@ -146,14 +159,6 @@ y_val = val_df[label].values.tolist()
 X_test = test_df['path'].values.tolist()
 y_test = test_df[label].values.tolist()
 
-# get mean and std values for training set for normalization of the data.
-#mu = np.mean(y_train, axis=0)
-#std = np.std(y_train, axis=0)
-
-# simple normalization
-#y_train_norm = (y_train - mu) / std
-#y_val_norm = (y_val - mu) / std
-#y_test_norm = (y_test - mu) / std
 
 # printing the dataset size.
 if dist.get_rank() == 0:
@@ -162,11 +167,11 @@ if dist.get_rank() == 0:
     print('The size of test samples {}'.format(len(y_test)))
 
 
-# Regression dataset definition
+# Classification dataset definition
 class ClassificationDataset_All(torch.utils.data.Dataset):
     def __init__(self, image_files, labels, transforms):
         self.image_files = image_files
-        self.labels = np.array(labels) # YY
+        self.labels = np.array(labels)  # YY
         self.transforms = transforms
 
     def __len__(self):
@@ -176,28 +181,11 @@ class ClassificationDataset_All(torch.utils.data.Dataset):
         return self.transforms(self.image_files[index]), self.labels[index]
 
 
-class EarlyStopping:
-    def __init__(self, tolerance=5, min_delta=0):
-
-        self.tolerance = tolerance
-        self.min_delta = min_delta
-        self.counter = 0
-        self.early_stop = False
-
-    def __call__(self, train_loss, validation_loss):
-        if (validation_loss - train_loss) > self.min_delta:
-            self.counter += 1
-            if self.counter >= self.tolerance:
-                self.early_stop = True
-
-
-image_size = args.input_size
-
 train_transforms = Compose(
     [
         LoadImage(image_only=True),
         EnsureChannelFirst(),
-        Resize((image_size, image_size)),
+        Resize((args.input_size, args.input_size)),
         ScaleIntensity(),
     ]
 )
@@ -206,7 +194,7 @@ val_transforms = Compose(
     [
         LoadImage(image_only=True),
         EnsureChannelFirst(),
-        Resize((image_size, image_size)),
+        Resize((args.input_size, args.input_size)),
         ScaleIntensity()
     ]
 )
@@ -224,13 +212,14 @@ test_ds = ClassificationDataset_All(X_test, y_test, val_transforms)
 test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
 
 # Defining the model
-from transformers import ViTFeatureExtractor, ViTForImageClassification, SwinForImageClassification
+from transformers import ViTForImageClassification, SwinForImageClassification
 
 model_name_or_path = args.base_model
 device = torch.device(f"cuda:{args.local_rank}")
 torch.cuda.set_device(device)
 
-# Specialized model with multiple outpus.
+
+# Specialized model with multiple outputs.
 class SwinforClassification(torch.nn.Module):
     def __init__(self, model_name_or_path='microsoft/swin-large-patch4-window12-384-in22k', n_label=7):
         super().__init__()
@@ -238,34 +227,21 @@ class SwinforClassification(torch.nn.Module):
                                                            ignore_mismatched_sizes=True)
         self.swin = model.swin
         self.regressor_sex = torch.nn.Linear(1536, 2)
-        self.regressor_smoking = torch.nn.Linear(1536, 3)
+        self.regressor_smoking = torch.nn.Linear(1536, 2)
         self.regressor_sleeplessness = torch.nn.Linear(1536, 3)
         self.regressor_alcohol = torch.nn.Linear(1536, 6)
-        self.regressor_depression = torch.nn.Linear(1536, 6)
+        self.regressor_depression = torch.nn.Linear(1536, 2)
         self.regressor_economic_status = torch.nn.Linear(1536, 5)
 
-        self.softmax_sex = torch.nn.Softmax()
-        self.softmax_smoking = torch.nn.Softmax()
-        self.softmax_sleeplessness = torch.nn.Softmax()
-        self.softmax_alcohol = torch.nn.Softmax()
-        self.softmax_depression = torch.nn.Softmax()
-        self.softmax_economic_status = torch.nn.Softmax()
 
     def forward(self, x):
         y_swin = self.swin(x).pooler_output
-
         y_sex = self.regressor_sex(y_swin)
-        # y_sex = self.softmax_sex(y_sex)
         y_smoking = self.regressor_smoking(y_swin)
-        # y_smoking = self.softmax_smoking(y_smoking)
         y_sleeplessness = self.regressor_sleeplessness(y_swin)
-        # y_sleeplessness = self.softmax_sleeplessness(y_sleeplessness)
         y_alcohol = self.regressor_alcohol(y_swin)
-        # y_alcohol = self.softmax_alcohol(y_alcohol)
         y_depression = self.regressor_depression(y_swin)
-        # y_depression = self.softmax_depression(y_depression)
         y_economic_status = self.regressor_economic_status(y_swin)
-        # y_economic_status = self.softmax_economic_status(y_economic_status)
 
         return y_sex, y_smoking, y_sleeplessness, y_alcohol, y_depression, y_economic_status
 
@@ -276,22 +252,17 @@ if 'vit' in args.base_model:
         num_labels=len(args.label))
 
 elif 'swin' in args.base_model:
-    #model = SwinForImageClassification.from_pretrained(
-    #    model_name_or_path,
-    #    num_labels=len(args.label),
-    #    ignore_mismatched_sizes=True)
     model = SwinforClassification(model_name_or_path=args.base_model, n_label=6)
 
-#metric = torchmetrics.MeanSquaredError().to(device)
-#model.metric = metric
+# put model to device
 model.to(device)
 
 # evaluation metric.
 train_roc_sex = torchmetrics.AUROC(task="multiclass", num_classes=2).to(device)
 valid_roc_sex = torchmetrics.AUROC(task="multiclass", num_classes=2).to(device)
 
-train_roc_smoking = torchmetrics.AUROC(task="multiclass", num_classes=3).to(device)
-valid_roc_smoking = torchmetrics.AUROC(task="multiclass", num_classes=3).to(device)
+train_roc_smoking = torchmetrics.AUROC(task="multiclass", num_classes=2).to(device)
+valid_roc_smoking = torchmetrics.AUROC(task="multiclass", num_classes=2).to(device)
 
 train_roc_sleeplessness = torchmetrics.AUROC(task="multiclass", num_classes=3).to(device)
 valid_roc_sleeplessness = torchmetrics.AUROC(task="multiclass", num_classes=3).to(device)
@@ -299,15 +270,14 @@ valid_roc_sleeplessness = torchmetrics.AUROC(task="multiclass", num_classes=3).t
 train_roc_alcohol = torchmetrics.AUROC(task="multiclass", num_classes=6).to(device)
 valid_roc_alcohol = torchmetrics.AUROC(task="multiclass", num_classes=6).to(device)
 
-train_roc_depression = torchmetrics.AUROC(task="multiclass", num_classes=6).to(device)
-valid_roc_depression = torchmetrics.AUROC(task="multiclass", num_classes=6).to(device)
+train_roc_depression = torchmetrics.AUROC(task="multiclass", num_classes=2).to(device)
+valid_roc_depression = torchmetrics.AUROC(task="multiclass", num_classes=2).to(device)
 
 train_roc_economic_status = torchmetrics.AUROC(task="multiclass", num_classes=5).to(device)
 valid_roc_economic_status = torchmetrics.AUROC(task="multiclass", num_classes=5).to(device)
 
 # Defining the variables for training
 optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-#optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
 scheduler = lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
 
 # different loss functions for each risk factors.
@@ -320,7 +290,7 @@ loss_function_economic_status = torch.nn.CrossEntropyLoss()
 max_epochs = args.epoch
 model = DistributedDataParallel(model, device_ids=[device])
 
-# YY#####################################################################################################################
+######################################################################################################################
 args.rank = dist.get_rank()
 args.logdir = os.path.join(args.logdir,
                            f"run_{os.environ['SLURM_JOB_NAME']}" + datetime.now().strftime("%m-%d-%Y-%H:%M:%S"))  # YY
@@ -337,9 +307,21 @@ def train_model(model=model,
                 val_loader=val_loader,
                 max_epochs=max_epochs,
                 optimizer=optimizer,
-                loss_functions=[loss_function_sex, loss_function_smoking, loss_function_sleeplessness, loss_function_alcohol, loss_function_depression, loss_function_economic_status],
+                loss_functions=None,
                 model_name=args.model_name,
-                working_dir='./red/ruogu.fang/leem.s/NSF-SCH/code/savedmodel'):
+                working_dir='Swin_Classification'):
+
+    """
+    :param model: The model you want to train (it should be in the device)
+    :param train_loader: Defined train loader (it should be in the device)
+    :param val_loader: Defined val loader (it should be in the device)
+    :param max_epochs: maximum number of epochs.
+    :param optimizer: pytorch optimizer
+    :param loss_functions: the list of loss functions for each label. It should be in the format of lists.
+    :param model_name: The model name. Usually, the default is Swin, because we used Swin Transformer.
+    :param working_dir: Where you would save the model.
+    :return: Trained model weights
+    """
 
     # defining the path for saving the model.
     if dist.get_rank() == 0 and not os.path.exists(os.path.join('./savedmodel', working_dir)):
@@ -353,7 +335,7 @@ def train_model(model=model,
     best_metric_epoch = 0
     epoch_loss_values = []
     val_interval = 1
-    val_loss=0
+    val_loss = 0
 
     global_step = 0  #####YY####
 
@@ -372,17 +354,9 @@ def train_model(model=model,
             tik = time()
             step += 1
             global_step += 1
-            print(f"label size= {len(labels)}, labels[0]:",labels[0])
-            #labels = labels.type(torch.Tensor)
-            #labels = torch.Tensor(labels)
-            
+
             # transfer the data to gpu
             inputs, labels = inputs.to(device), labels.to(device)
-            #inputs = inputs.to(device),
-            #labels = [lbl.to(device) for lbl in labels] ## YYang try to resolve the list(Tensor) issue
-
-
-
             optimizer.zero_grad()
 
             # Feed-Forward
@@ -402,16 +376,13 @@ def train_model(model=model,
             optimizer.step()
             epoch_loss += loss.item()
 
-            # YY calculate the accuracy for trainset
-            # acc = metric(outputs, labels)
+            # calculate the accuracy for trainset
             batch_roc_sex = train_roc_sex(torch.tensor(outputs[0]), labels[:, 0].long())
             batch_roc_smoking = train_roc_smoking(torch.tensor(outputs[1]), labels[:, 1].long())
             batch_roc_sleeplessness = train_roc_sleeplessness(torch.tensor(outputs[2]), labels[:, 2].long())
             batch_roc_alcohol = train_roc_alcohol(torch.tensor(outputs[3]), labels[:, 3].long())
             batch_roc_depression = train_roc_depression(torch.tensor(outputs[4]), labels[:, 4].long())
             batch_roc_economic_status = train_roc_economic_status(torch.tensor(outputs[5]), labels[:, 5].long())
-
-
 
             print(f"[{args.rank}] " + f"train: " +
                   f"epoch {epoch}/{max_epochs - 1}, " +
@@ -423,15 +394,18 @@ def train_model(model=model,
                   f"batch_roc for alcohol: {batch_roc_alcohol.item():.2f}, " +
                   f"batch_roc for depression: {batch_roc_depression.item():.2f}, " +
                   f"batch_roc for economic_status: {batch_roc_economic_status.item():.2f}, " +
-                  f"time: {(time() - tik):.2f}s"
-                  )
+                  f"time: {(time() - tik):.2f}s")
+
             writer.add_scalar("train/batch_loss", scalar_value=loss.item(), global_step=global_step)
             writer.add_scalar("train/batch_roc_sex", scalar_value=batch_roc_sex.item(), global_step=global_step)
             writer.add_scalar("train/batch_roc_smoking", scalar_value=batch_roc_smoking.item(), global_step=global_step)
-            writer.add_scalar("train/batch_roc_sleeplessness", scalar_value=batch_roc_sleeplessness.item(), global_step=global_step)
+            writer.add_scalar("train/batch_roc_sleeplessness", scalar_value=batch_roc_sleeplessness.item(),
+                              global_step=global_step)
             writer.add_scalar("train/batch_roc_alcohol", scalar_value=batch_roc_alcohol.item(), global_step=global_step)
-            writer.add_scalar("train/batch_roc_depression", scalar_value=batch_roc_depression.item(), global_step=global_step)
-            writer.add_scalar("train/batch_roc_economic_status", scalar_value=batch_roc_economic_status.item(), global_step=global_step)
+            writer.add_scalar("train/batch_roc_depression", scalar_value=batch_roc_depression.item(),
+                              global_step=global_step)
+            writer.add_scalar("train/batch_roc_economic_status", scalar_value=batch_roc_economic_status.item(),
+                              global_step=global_step)
 
         # https://devblog.pytorchlightning.ai/torchmetrics-pytorch-metrics-built-to-scale-7091b1bec919
         total_train_roc_sex = train_roc_sex.compute()
@@ -459,10 +433,13 @@ def train_model(model=model,
             writer.add_scalar("train/epoch_roc_sex", scalar_value=total_train_roc_sex, global_step=epoch)  # YY
             writer.add_scalar("train/epoch_roc_smoking", scalar_value=total_train_roc_smoking,
                               global_step=epoch)  # YY
-            writer.add_scalar("train/epoch_roc_sleeplessness", scalar_value=total_train_roc_sleeplessness, global_step=epoch)  # YY
+            writer.add_scalar("train/epoch_roc_sleeplessness", scalar_value=total_train_roc_sleeplessness,
+                              global_step=epoch)  # YY
             writer.add_scalar("train/epoch_roc_alcohol", scalar_value=total_train_roc_alcohol, global_step=epoch)  # YY
-            writer.add_scalar("train/epoch_roc_depression", scalar_value=total_train_roc_depression, global_step=epoch)  # YY
-            writer.add_scalar("train/epoch_roc_economic_status", scalar_value=total_train_roc_economic_status, global_step=epoch)  # YY
+            writer.add_scalar("train/epoch_roc_depression", scalar_value=total_train_roc_depression,
+                              global_step=epoch)  # YY
+            writer.add_scalar("train/epoch_roc_economic_status", scalar_value=total_train_roc_economic_status,
+                              global_step=epoch)  # YY
 
         # validation mode
         if (epoch + 1) % val_interval == 0:
@@ -484,15 +461,14 @@ def train_model(model=model,
 
                     val_loss += val_loss_sex + val_loss_smoking + val_loss_sleeplessness + val_loss_alcohol + val_loss_depression + val_loss_economic_status
 
-                    #result = metric(outputs, val_labels)
-
-                    # YY
                     batch_roc_sex_valid = valid_roc_sex(torch.tensor(outputs[0]), val_labels[:, 0].long())
                     batch_roc_smoking_valid = valid_roc_smoking(torch.tensor(outputs[1]), val_labels[:, 1].long())
-                    batch_roc_sleeplessness_valid = valid_roc_sleeplessness(torch.tensor(outputs[2]), val_labels[:, 2].long())
+                    batch_roc_sleeplessness_valid = valid_roc_sleeplessness(torch.tensor(outputs[2]),
+                                                                            val_labels[:, 2].long())
                     batch_roc_alcohol_valid = valid_roc_alcohol(torch.tensor(outputs[3]), val_labels[:, 3].long())
                     batch_roc_depression_valid = valid_roc_depression(torch.tensor(outputs[4]), val_labels[:, 4].long())
-                    batch_roc_economic_status_valid = valid_roc_economic_status(torch.tensor(outputs[5]), val_labels[:, 5].long())
+                    batch_roc_economic_status_valid = valid_roc_economic_status(torch.tensor(outputs[5]),
+                                                                                val_labels[:, 5].long())
 
                     if dist.get_rank() == 0:  # print only for rank 0
                         print(f"Batch {val_step} AUROC for sex is {batch_roc_sex_valid}")
@@ -508,13 +484,16 @@ def train_model(model=model,
                         writer.add_scalar("validation/batch_roc_education_valid",
                                           scalar_value=batch_roc_smoking_valid.item(),
                                           global_step=global_step)
-                        writer.add_scalar("validation/batch_roc_sleep_valid", scalar_value=batch_roc_sleeplessness_valid.item(),
+                        writer.add_scalar("validation/batch_roc_sleep_valid",
+                                          scalar_value=batch_roc_sleeplessness_valid.item(),
                                           global_step=global_step)
                         writer.add_scalar("validation/batch_roc_BMI_valid", scalar_value=batch_roc_alcohol_valid.item(),
                                           global_step=global_step)
-                        writer.add_scalar("validation/batch_roc_dbp_valid", scalar_value=batch_roc_depression_valid.item(),
+                        writer.add_scalar("validation/batch_roc_dbp_valid",
+                                          scalar_value=batch_roc_depression_valid.item(),
                                           global_step=global_step)
-                        writer.add_scalar("validation/batch_roc_sbp_valid", scalar_value=batch_roc_economic_status_valid.item(),
+                        writer.add_scalar("validation/batch_roc_sbp_valid",
+                                          scalar_value=batch_roc_economic_status_valid.item(),
                                           global_step=global_step)
 
                     epoch_val_loss += val_loss
@@ -534,8 +513,9 @@ def train_model(model=model,
                 result_depression = total_val_roc_depression.cpu().detach().numpy()
                 result_economic_status = total_val_roc_economic_status.cpu().detach().numpy()
 
-                val_list = [result_sex, result_smoking, result_sleeplessness, result_alcohol, result_depression, result_economic_status]
-                val_result = sum(val_list)/len(val_list)
+                val_list = [result_sex, result_smoking, result_sleeplessness, result_alcohol, result_depression,
+                            result_economic_status]
+                val_result = sum(val_list) / len(val_list)
 
                 if dist.get_rank() == 0:  # print only for rank 0
                     print(f"AUROC sex on all data: {result_sex}")
@@ -545,13 +525,14 @@ def train_model(model=model,
                     print(f"AUROC depression on all data: {result_depression}")
                     print(f"AUROC economic status on all data: {result_economic_status}")
 
-
                     writer.add_scalar("validation/AUROC_sex", scalar_value=result_sex, global_step=epoch)
                     writer.add_scalar("validation/AUROC_smoking", scalar_value=result_smoking, global_step=epoch)
-                    writer.add_scalar("validation/AUROC_sleeplessness", scalar_value=result_sleeplessness, global_step=epoch)
+                    writer.add_scalar("validation/AUROC_sleeplessness", scalar_value=result_sleeplessness,
+                                      global_step=epoch)
                     writer.add_scalar("validation/AUROC_alcohol", scalar_value=result_alcohol, global_step=epoch)
                     writer.add_scalar("validation/AUROC_depression", scalar_value=result_depression, global_step=epoch)
-                    writer.add_scalar("validation/AUROC_economic status", scalar_value=result_economic_status, global_step=epoch)
+                    writer.add_scalar("validation/AUROC_economic status", scalar_value=result_economic_status,
+                                      global_step=epoch)
 
                 if epoch == 0:
                     best_loss = val_loss
@@ -560,7 +541,7 @@ def train_model(model=model,
                     best_metric = val_result
 
                 elif epoch != 0:
-                    if val_result > best_metric:  # val_loss < best_loss: # YY I think this should use best_metric instead of loss to save the best model
+                    if val_result > best_metric:
                         best_loss = val_loss
                         best_model = model
                         best_metric = val_result
@@ -582,8 +563,6 @@ def train_model(model=model,
                         f" best MSE: {best_loss}",
                         f" at epoch: {best_metric_epoch + 1}"
                     )
-
-        #metric.reset()
 
         train_roc_sex.reset()
         train_roc_smoking.reset()
@@ -614,7 +593,9 @@ def train_model(model=model,
 
 best_model_wts = train_model(model=model, train_loader=train_loader, val_loader=val_loader, max_epochs=max_epochs,
                              optimizer=optimizer,
-                             loss_functions=[loss_function_sex, loss_function_smoking, loss_function_sleeplessness, loss_function_alcohol, loss_function_depression, loss_function_economic_status],
+                             loss_functions=[loss_function_sex, loss_function_smoking, loss_function_sleeplessness,
+                                             loss_function_alcohol, loss_function_depression,
+                                             loss_function_economic_status],
                              model_name=args.model_name,
                              working_dir=args.working_dir)
 

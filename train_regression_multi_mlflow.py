@@ -1,44 +1,43 @@
+"""
+This script was primarily written by Seowung Leem, and revised by Yunchao Yang.
+The multi-mlflow version of the code is developed for multi-gpu application for the HiperGator Development Environment.
+Therefore, it might not work on some on different PC.
+
+For any questions, please email Seowung Leem.
+
+institute: leem.s@ufl.edu
+personal: dlatjdnd@gmail.com
+"""
+
 # Basic library
 import os
 import random
 import copy
 import numpy as np
 import pandas as pd
-import tqdm
 import argparse
 from datetime import timedelta
 
 # Pytorch Related Library
 import torch
-from torchvision import transforms
 from torch.optim import lr_scheduler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 import torchmetrics
 
-# Scikit-Learn Library
-from sklearn.model_selection import train_test_split
-
 # Monai Library
-from monai.config import print_config
 from monai.data import DataLoader, DistributedSampler
-from monai.metrics import ROCAUCMetric
 from monai.transforms import (
-    Activations,
     EnsureChannelFirst,
-    AsDiscrete,
     Compose,
     LoadImage,
     Resize,
-    RandZoom,
     ScaleIntensity)
 
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from time import time
 
-#from ray import tune
-#from ray.tune.suggest.optuna import OptunaSearch
 
 # defining the input arguments for the script.
 parser = argparse.ArgumentParser(description='Parameters ')
@@ -53,11 +52,14 @@ parser.add_argument('--right_image_dir', default='/red/ruogu.fang/UKB/data/Eye/2
 parser.add_argument('--csv_dir', default='/red/ruogu.fang/leem.s/NSF-SCH/data/regression_data.csv', type=str,
                     help='Where the csv file for the dataset is stored.')
 
-parser.add_argument('--left_eye_code', default='_21015_0_0.png', type=str, help='The code added to eid of the UKB subjects')
-parser.add_argument('--right_eye_code', default='_21016_0_0.png', type=str, help='The code added to eid of the UKB subjects')
+parser.add_argument('--left_eye_code', default='_21015_0_0.png', type=str,
+                    help='The code added to eid of the UKB subjects')
+parser.add_argument('--right_eye_code', default='_21016_0_0.png', type=str,
+                    help='The code added to eid of the UKB subjects')
 
 parser.add_argument('--label', type=str, nargs='+', help='Column names of the csv file. It should be the label.')
-parser.add_argument('--exclude', type=float, nargs='+', help='The exclude code. example, -1, -2, -3 negative integers are not labels, but exclusion code for reason')
+parser.add_argument('--exclude', type=float, nargs='+',
+                    help='The exclude code. example, -1, -2, -3 negative integers are not labels, but exclusion code for reason')
 
 parser.add_argument('--working_dir', default='Swin_regression', type=str, help='where you would save the result')
 parser.add_argument('--model_name', default='Swin_regression', type=str, help='name of saved model.')
@@ -181,28 +183,11 @@ class RegressionDataset_All(torch.utils.data.Dataset):
         return self.transforms(self.image_files[index]), self.labels[index]
 
 
-class EarlyStopping:
-    def __init__(self, tolerance=5, min_delta=0):
-
-        self.tolerance = tolerance
-        self.min_delta = min_delta
-        self.counter = 0
-        self.early_stop = False
-
-    def __call__(self, train_loss, validation_loss):
-        if (validation_loss - train_loss) > self.min_delta:
-            self.counter += 1
-            if self.counter >= self.tolerance:
-                self.early_stop = True
-
-
-image_size = args.input_size
-
 train_transforms = Compose(
     [
         LoadImage(image_only=True),
         EnsureChannelFirst(),
-        Resize((image_size, image_size)),
+        Resize((args.input_size, args.input_size)),
         ScaleIntensity(),
     ]
 )
@@ -211,7 +196,7 @@ val_transforms = Compose(
     [
         LoadImage(image_only=True),
         EnsureChannelFirst(),
-        Resize((image_size, image_size)),
+        Resize((args.input_size, args.input_size)),
         ScaleIntensity()
     ]
 )
@@ -229,13 +214,14 @@ test_ds = RegressionDataset_All(X_test, y_test_norm, val_transforms)
 test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
 
 # Defining the model
-from transformers import ViTFeatureExtractor, ViTForImageClassification, SwinForImageClassification
+from transformers import ViTForImageClassification, SwinForImageClassification
 
 model_name_or_path = args.base_model
 device = torch.device(f"cuda:{args.local_rank}")
 torch.cuda.set_device(device)
 
-# Specialized model with multiple outpus.
+
+# Specialized model with multiple outputs.
 class SwinforRegression(torch.nn.Module):
     def __init__(self, model_name_or_path=args.base_model, n_label=7):
         super().__init__()
@@ -269,10 +255,6 @@ if 'vit' in args.base_model:
         num_labels=len(args.label))
 
 elif 'swin' in args.base_model:
-    #model = SwinForImageClassification.from_pretrained(
-    #    model_name_or_path,
-    #    num_labels=len(args.label),
-    #    ignore_mismatched_sizes=True)
     model = SwinforRegression(model_name_or_path=args.base_model, n_label=7)
 
 metric = torchmetrics.MeanSquaredError().to(device)
@@ -303,7 +285,6 @@ valid_r2_HbA1C = torchmetrics.R2Score().to(device)
 
 # Defining the variables for training
 optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-#optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
 scheduler = lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
 
 # different loss functions for each risk factors.
@@ -317,14 +298,13 @@ loss_function_HbA1C = torch.nn.MSELoss()
 max_epochs = args.epoch
 model = DistributedDataParallel(model, device_ids=[device])
 
-# YY#####################################################################################################################
+######################################################################################################################
 args.rank = dist.get_rank()
 args.logdir = os.path.join(args.logdir,
                            f"run_{os.environ['SLURM_JOB_NAME']}" + datetime.now().strftime("%m-%d-%Y-%H:%M:%S"))  # YY
 writer = SummaryWriter(log_dir=args.logdir)
 if args.rank == 0:
     print(f"[{args.rank}] " + f"Writing Tensorboard logs to {args.logdir}")
-
 #####################################################################################################################
 
 
@@ -334,7 +314,7 @@ def train_model(model=model,
                 val_loader=val_loader,
                 max_epochs=max_epochs,
                 optimizer=optimizer,
-                loss_functions=[loss_function_age, loss_function_education, loss_function_sleep, loss_function_BMI, loss_function_dbp, loss_function_sbp, loss_function_HbA1C],
+                loss_functions=None,
                 model_name=args.model_name,
                 working_dir='./red/ruogu.fang/leem.s/NSF-SCH/code/savedmodel'):
 
@@ -350,9 +330,9 @@ def train_model(model=model,
     best_metric_epoch = 0
     epoch_loss_values = []
     val_interval = 1
-    val_loss=0
+    val_loss = 0
 
-    global_step = 0  #####YY####
+    global_step = 0
 
     for epoch in range(max_epochs):
         if dist.get_rank() == 0:
@@ -369,7 +349,6 @@ def train_model(model=model,
             tik = time()
             step += 1
             global_step += 1
-            
             labels = labels.type(torch.Tensor)
 
             # transfer the data to gpu
@@ -394,8 +373,7 @@ def train_model(model=model,
             optimizer.step()
             epoch_loss += loss.item()
 
-            # YY calculate the accuracy for trainset
-            # acc = metric(outputs, labels)
+            # calculate the accuracy for trainset
             batch_r2_age = train_r2_age(torch.tensor(outputs[0]), labels[:, 0].unsqueeze(1))
             batch_r2_education = train_r2_education(torch.tensor(outputs[1]), labels[:, 1].unsqueeze(1))
             batch_r2_sleep = train_r2_sleep(torch.tensor(outputs[2]), labels[:, 2].unsqueeze(1))
@@ -480,11 +458,10 @@ def train_model(model=model,
                     val_loss_HbA1C = loss_functions[6](outputs[6].squeeze(), val_labels[:, 6])
                     val_loss = val_loss_age + val_loss_education + val_loss_sleep + val_loss_BMI + val_loss_dbp + val_loss_sbp + val_loss_HbA1C
 
-                    #result = metric(outputs, val_labels)
 
-                    # YY
                     batch_r2_age_valid = valid_r2_age(torch.tensor(outputs[0]), val_labels[:, 0].unsqueeze(1))
-                    batch_r2_education_valid = valid_r2_education(torch.tensor(outputs[1]), val_labels[:, 1].unsqueeze(1))
+                    batch_r2_education_valid = valid_r2_education(torch.tensor(outputs[1]),
+                                                                  val_labels[:, 1].unsqueeze(1))
                     batch_r2_sleep_valid = valid_r2_sleep(torch.tensor(outputs[2]), val_labels[:, 2].unsqueeze(1))
                     batch_r2_BMI_valid = valid_r2_BMI(torch.tensor(outputs[3]), val_labels[:, 3].unsqueeze(1))
                     batch_r2_dbp_valid = valid_r2_dbp(torch.tensor(outputs[4]), val_labels[:, 4].unsqueeze(1))
@@ -538,7 +515,7 @@ def train_model(model=model,
 
                 val_list = [result_age, result_education, result_sleep, result_BMI, result_dbp, result_sbp,
                             result_HbA1C]
-                val_result = sum(val_list)/len(val_list)
+                val_result = sum(val_list) / len(val_list)
 
                 if dist.get_rank() == 0:  # print only for rank 0
                     print(f"R2 age on all data: {result_age}")
@@ -564,7 +541,7 @@ def train_model(model=model,
                     best_metric = val_result
 
                 elif epoch != 0:
-                    if val_result > best_metric:  # val_loss < best_loss: # YY I think this should use best_metric instead of loss to save the best model
+                    if val_result > best_metric:
                         best_loss = val_loss
                         best_model = model
                         best_metric = val_result
@@ -586,8 +563,6 @@ def train_model(model=model,
                         f" best MSE: {best_loss}",
                         f" at epoch: {best_metric_epoch + 1}"
                     )
-
-        #metric.reset()
 
         train_r2_age.reset()
         train_r2_education.reset()
@@ -620,7 +595,9 @@ def train_model(model=model,
 
 best_model_wts = train_model(model=model, train_loader=train_loader, val_loader=val_loader, max_epochs=max_epochs,
                              optimizer=optimizer,
-                             loss_functions=[loss_function_age, loss_function_education, loss_function_sleep, loss_function_BMI, loss_function_dbp, loss_function_sbp, loss_function_HbA1C],
+                             loss_functions=[loss_function_age, loss_function_education, loss_function_sleep,
+                                             loss_function_BMI, loss_function_dbp, loss_function_sbp,
+                                             loss_function_HbA1C],
                              model_name=args.model_name,
                              working_dir=args.working_dir)
 
