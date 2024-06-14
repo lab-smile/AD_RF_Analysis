@@ -50,8 +50,10 @@ parser.add_argument('--model_name', default='ViT_sex', type=str, help='random se
 parser.add_argument('--base_model', default='google/vit-base-patch16-224-in21k', type=str,
                     help='the string of model from hugging-face library')
 
+parser.add_argument('--input_size', default=224, type=int, help='input size for the model')
 parser.add_argument('--lr', default=2e-4, type=float, help='learning rate of the training')
 parser.add_argument('--epoch', default=100, type=int, help='maximum number of epoch')
+parser.add_argument('--batch_size', default=32, type=int, help='batch size of the training')
 
 # set argument as input variables
 args = parser.parse_args()
@@ -134,13 +136,13 @@ class EarlyStopping:
                 self.early_stop = True
 
 
-image_size = 224
+image_size = args.input_size
 
 train_transforms = Compose(
     [
         LoadImage(image_only=True),
         EnsureChannelFirst(),
-        Resize((224, 224)),
+        Resize((image_size, image_size)),
         ScaleIntensity(),
         # RandRotate(range_x=np.pi / 12, prob=0.5, keep_size=True),
     ]
@@ -150,33 +152,41 @@ val_transforms = Compose(
     [
         LoadImage(image_only=True),
         EnsureChannelFirst(),
-        Resize((224, 224)),
+        Resize((image_size, image_size)),
         ScaleIntensity()
     ]
 )
 
+
 # Dataset & Dataloader
 train_ds = ClassificationDataset(X_train, y_train, train_transforms)
 train_sampler = DistributedSampler(dataset=train_ds, even_divisible=True, shuffle=True)
-train_loader = DataLoader(train_ds, batch_size=32, shuffle=False, pin_memory=True, sampler=train_sampler)
+train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=False, pin_memory=True, sampler=train_sampler)
 
 val_ds = ClassificationDataset(X_val, y_val, val_transforms)
 val_sampler = DistributedSampler(dataset=val_ds, even_divisible=True, shuffle=True)
-val_loader = DataLoader(val_ds, batch_size=32, shuffle=False, pin_memory=True, sampler=val_sampler)
+val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, pin_memory=True, sampler=val_sampler)
 
 test_ds = ClassificationDataset(X_test, y_test, val_transforms)
-test_loader = DataLoader(test_ds, batch_size=32, shuffle=False)
+test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
 
 # Defining the model
-from transformers import ViTFeatureExtractor, ViTForImageClassification
+from transformers import ViTFeatureExtractor, ViTForImageClassification, SwinForImageClassification
 model_name_or_path = args.base_model
 
 device = torch.device(f"cuda:{args.local_rank}")
 torch.cuda.set_device(device)
 
-model = ViTForImageClassification.from_pretrained(
-    model_name_or_path,
-    num_labels=len(label_df[label_code].unique()))
+if 'vit' in args.base_model:
+    model = ViTForImageClassification.from_pretrained(
+        model_name_or_path,
+        num_labels=len(label_df[label_code].unique()))
+
+elif 'swin' in args.base_model:
+    model = SwinForImageClassification.from_pretrained(
+        model_name_or_path,
+        num_labels=len(label_df[label_code].unique()),
+        ignore_mismatched_sizes=True)
 
 metric = torchmetrics.Accuracy(task="multiclass", num_classes=len(label_df[label_code].unique())).to(device)
 model.metric = metric
